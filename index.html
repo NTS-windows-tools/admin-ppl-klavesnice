@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - PPL Přeprava</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        /* Animace pro modální okno */
+        .modal-enter { opacity: 0; transform: scale(0.95); }
+        .modal-enter-active { opacity: 1; transform: scale(1); transition: all 0.2s ease-out; }
+        .modal-exit { opacity: 0; transform: scale(0.95); transition: all 0.2s ease-in; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen p-4 flex justify-center items-start">
+
+    <div class="w-full max-w-lg bg-white rounded-xl shadow-lg overflow-hidden mt-6">
+        <div class="p-6 border-b border-gray-100 bg-yellow-400 text-yellow-900">
+            <h1 class="text-2xl font-bold">PPL přeprava klávesnice</h1>
+        </div>
+
+        <div class="p-6">
+            <h2 class="text-lg font-semibold text-gray-700 mb-4">Zadat stavy:</h2>
+            <hr class="border-gray-200 mb-6">
+
+            <div id="status-list" class="space-y-3">
+                <p class="text-gray-400 text-center">Načítání databáze...</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="time-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm p-4">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 transform transition-all scale-100">
+            <h3 class="text-xl font-bold text-gray-800 mb-2">Zadat čas dokončení kroku</h3>
+            <p class="text-gray-500 text-sm mb-4">Vyberte datum a čas události.</p>
+            
+            <input type="datetime-local" id="time-input" class="w-full border border-gray-300 rounded-lg p-3 text-gray-700 focus:ring-2 focus:ring-yellow-400 focus:border-yellow-400 outline-none mb-6">
+
+            <div class="flex justify-end gap-3">
+                <button id="time-cancel" class="px-4 py-2 text-gray-600 font-medium hover:bg-gray-100 rounded-lg transition">Zpět</button>
+                <button id="time-confirm" class="px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white font-bold rounded-lg shadow-md transition hidden">Potvrdit</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="redirect-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm p-4">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6">
+            <h3 class="text-xl font-bold text-gray-800 mb-2">Přidat přesměrování</h3>
+            <p class="text-gray-500 text-sm mb-4">Zadat stránku na přesměrování k vyzvednutí - štítek pro vyzvednutí:</p>
+            
+            <input type="url" id="redirect-input" placeholder="https://..." class="w-full border border-gray-300 rounded-lg p-3 text-gray-700 focus:ring-2 focus:ring-blue-400 focus:border-blue-400 outline-none mb-6">
+
+            <div class="flex justify-end gap-3">
+                <button id="redirect-cancel" class="px-4 py-2 text-gray-600 font-medium hover:bg-gray-100 rounded-lg transition">Zpět</button>
+                <button id="redirect-confirm" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow-md transition hidden">Potvrdit</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js";
+        import { getDatabase, ref, set, onValue, remove } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-database.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyAKgyikQUFoey9hFfS4drkUNwhkl6izyRw",
+            authDomain: "ppl-doprava-klavesnice.firebaseapp.com",
+            databaseURL: "https://ppl-doprava-klavesnice-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "ppl-doprava-klavesnice",
+            storageBucket: "ppl-doprava-klavesnice.firebasestorage.app",
+            messagingSenderId: "550516585430",
+            appId: "1:550516585430:web:2b8011e8cab7330a702a77"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        // Definice stavů
+        const steps = [
+            "Objednáno",
+            "Odesláno na výdejním / podacím místě PPL ParcelShop",
+            "Převzato do přepravy",
+            "Dorazila na depo: Praha Chrášťany",
+            "Opustila depo: Praha Chrášťany",
+            "Dorazila na depo: SPU Olomouc",
+            "Opustila depo SPU Olomouc",
+            "V dodávce",
+            "Zásilka je na rozvozovém vozidle na cestě na cílové výdejní místo!",
+            "Na výdejním místě - přesměrovat na vyzvednutí"
+        ];
+
+        const listContainer = document.getElementById('status-list');
+        let currentActiveStepIndex = null; // Který checkbox zrovna řešíme
+
+        // Modals Elements
+        const timeModal = document.getElementById('time-modal');
+        const timeInput = document.getElementById('time-input');
+        const timeConfirmBtn = document.getElementById('time-confirm');
+        const timeCancelBtn = document.getElementById('time-cancel');
+
+        const redirectModal = document.getElementById('redirect-modal');
+        const redirectInput = document.getElementById('redirect-input');
+        const redirectConfirmBtn = document.getElementById('redirect-confirm');
+        const redirectCancelBtn = document.getElementById('redirect-cancel');
+
+        // === LOGIKA APLIKACE ===
+
+        // 1. Vykreslení checkboxů a naslouchání změnám z DB
+        onValue(ref(db, 'tracking'), (snapshot) => {
+            const data = snapshot.val() || {};
+            renderList(data);
+        });
+
+        function renderList(data) {
+            listContainer.innerHTML = '';
+            
+            steps.forEach((stepName, index) => {
+                const isChecked = data[index] ? true : false;
+                const timestamp = data[index] ? data[index].time : '';
+                const isLast = index === steps.length - 1;
+                const redirectUrl = isLast && data.redirectUrl ? data.redirectUrl : null;
+
+                const row = document.createElement('div');
+                row.className = "flex items-start p-3 bg-white border border-gray-100 rounded-lg hover:bg-gray-50 transition";
+                
+                // Formátování zobrazeného času (pokud existuje)
+                let displayInfo = '';
+                if (isChecked && timestamp) {
+                    const dateObj = new Date(timestamp);
+                    displayInfo = `<span class="text-xs text-blue-600 font-mono block mt-1">${dateObj.toLocaleString('cs-CZ')}</span>`;
+                }
+                if (isLast && redirectUrl) {
+                    displayInfo += `<span class="text-xs text-green-600 block mt-1 truncate max-w-xs">🔗 ${redirectUrl}</span>`;
+                }
+
+                row.innerHTML = `
+                    <div class="flex items-center h-5">
+                        <input id="step-${index}" type="checkbox" class="w-5 h-5 text-yellow-500 border-gray-300 rounded focus:ring-yellow-400 cursor-pointer" ${isChecked ? 'checked' : ''}>
+                    </div>
+                    <div class="ml-3 text-sm">
+                        <label for="step-${index}" class="font-medium text-gray-700 cursor-pointer select-none">${stepName}</label>
+                        ${displayInfo}
+                    </div>
+                `;
+
+                // Event Listener pro kliknutí
+                const checkbox = row.querySelector('input');
+                checkbox.addEventListener('click', (e) => {
+                    e.preventDefault(); // Zastavíme okamžitou změnu, řešíme přes modál
+                    handleCheckboxClick(index, isChecked, isLast);
+                });
+
+                listContainer.appendChild(row);
+            });
+        }
+
+        function handleCheckboxClick(index, currentlyChecked, isLast) {
+            if (currentlyChecked) {
+                // Pokud už je zaškrtnuto -> Odškrtnout (smazat z DB)
+                if (confirm('Opravdu chcete zrušit tento stav?')) {
+                    if (isLast) {
+                        remove(ref(db, 'tracking/redirectUrl'));
+                    }
+                    remove(ref(db, `tracking/${index}`));
+                }
+            } else {
+                // Není zaškrtnuto -> Otevřít příslušný modál
+                currentActiveStepIndex = index;
+                if (isLast) {
+                    openRedirectModal();
+                } else {
+                    openTimeModal();
+                }
+            }
+        }
+
+        // === MODAL TIME LOGIC ===
+        function openTimeModal() {
+            timeInput.value = ''; // Reset
+            timeConfirmBtn.classList.add('hidden');
+            timeModal.classList.remove('hidden');
+        }
+
+        timeInput.addEventListener('input', () => {
+            if (timeInput.value) timeConfirmBtn.classList.remove('hidden');
+            else timeConfirmBtn.classList.add('hidden');
+        });
+
+        timeCancelBtn.addEventListener('click', () => {
+            timeModal.classList.add('hidden');
+            currentActiveStepIndex = null;
+        });
+
+        timeConfirmBtn.addEventListener('click', () => {
+            if (currentActiveStepIndex !== null && timeInput.value) {
+                const date = new Date(timeInput.value);
+                set(ref(db, `tracking/${currentActiveStepIndex}`), {
+                    step: steps[currentActiveStepIndex],
+                    time: timeInput.value, // ISO format from input
+                    timestamp: Date.now()
+                }).then(() => {
+                    timeModal.classList.add('hidden');
+                    currentActiveStepIndex = null;
+                });
+            }
+        });
+
+        // === MODAL REDIRECT LOGIC ===
+        function openRedirectModal() {
+            redirectInput.value = '';
+            redirectConfirmBtn.classList.add('hidden');
+            redirectModal.classList.remove('hidden');
+        }
+
+        redirectInput.addEventListener('input', () => {
+            if (redirectInput.value) redirectConfirmBtn.classList.remove('hidden');
+            else redirectConfirmBtn.classList.add('hidden');
+        });
+
+        redirectCancelBtn.addEventListener('click', () => {
+            redirectModal.classList.add('hidden');
+            currentActiveStepIndex = null;
+        });
+
+        redirectConfirmBtn.addEventListener('click', () => {
+            if (currentActiveStepIndex !== null && redirectInput.value) {
+                // Uložíme jak stav, tak URL
+                const updates = {};
+                updates[`tracking/${currentActiveStepIndex}`] = {
+                    step: steps[currentActiveStepIndex],
+                    time: new Date().toISOString(), // Aktuální čas pro konzistenci
+                    timestamp: Date.now()
+                };
+                updates[`tracking/redirectUrl`] = redirectInput.value;
+
+                import("https://www.gstatic.com/firebasejs/9.22.0/firebase-database.js").then(({ update }) => {
+                    update(ref(db), updates).then(() => {
+                        redirectModal.classList.add('hidden');
+                        currentActiveStepIndex = null;
+                    });
+                });
+            }
+        });
+
+    </script>
+</body>
+</html>
